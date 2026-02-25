@@ -4,14 +4,13 @@
 
 /* BUTTONS */
 
-
 //Buttons
 #define PIN_BUTTON1 49
-#define PIN_BUTTON1LED 9
+#define PIN_BUTTON1LED 8
 #define PIN_BUTTON2 51
-#define PIN_BUTTON2LED 10
+#define PIN_BUTTON2LED 9
 #define PIN_BUTTON3 53
-#define PIN_BUTTON3LED 11
+#define PIN_BUTTON3LED 10
 
 //Integers for the leds
 int led_button1 = 0;

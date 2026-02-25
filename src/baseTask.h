@@ -16,6 +16,7 @@ public:
   }
 
   virtual void main() = 0;
+  TaskHandle_t taskHandle;
 
 protected:
   uint16_t StackSize;
@@ -26,7 +27,7 @@ protected:
     pBaseTask->main();
   }
 
-  TaskHandle_t taskHandle;
+  //TaskHandle_t taskHandle;
 
 };      // end class BaseTask() --------------------------------------------------
 #endif  //BASE_TASK_H

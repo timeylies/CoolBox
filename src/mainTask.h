@@ -4,93 +4,258 @@
 
 #include "baseTask.h"
 
-//Main Task
+// Main Task
 
-class MainTask : public BaseTask {
+class MainTask : public BaseTask
+{
 
 public:
-  MainTask(uint16_t stackSize,  // class BaseTasks's arguments
+  MainTask(uint16_t stackSize, // class BaseTasks's arguments
            UBaseType_t priority,
-           const char* taskName)
-    : BaseTask{ stackSize, priority, taskName } {}
+           const char *taskName)
+      : BaseTask{stackSize, priority, taskName}
+  {
+  }
 
-  void main() override {
-    //startup
+  void main() override
+  {
+    // startup
     char buf[10];
     lcd.clear();
-    for (;;) {
+    // wait for discovery from serial
+    unsigned long prevMillis;
+    int pressReadLimit;
+    for (;;)
+    {
       // do stuff
-      if (xQueueReceive(actionUpdateQueue, &(buf), 0)) {
-        if (strcmp(buf, "update") == 0) {
-          updatePage();
-          //wake the screen
-          mil2 = millis();
+      // do menu stuff
+      uint32_t duration = 0;
+      if (encoderButton.isPressed())
+      {
+        if (pressReadLimit == 0)
+        {
+          prevMillis = millis();
+          pressReadLimit = 1;
+        }
+        duration = millis() - prevMillis;
+        if (duration >= 1000)
+        {
+          lcd.clear();
+          currentMenu = &mainMenu;
+          currentMenu->selected = 0;
+          isMenuShown = true;
+          lcd_updateMenu();
+          lcd.backlight();
+          duration = 0;
+          pressReadLimit = 0;
         }
       }
-      if (xQueueReceive(responseQueue, &(buf), 0)) {
-        //wake the screen
-        mil2 = millis();
-        lcd.setCursor(0, 2);
-        lcd.print("                    ");
-        mil = millis();
-        switch (buf[0]) {
+      else
+      {
+        duration = 0;
+        pressReadLimit = 0;
+      }
+      if (isMenuShown)
+      {
+        switch ((int)encoder.getDirection())
+        {
+        case 1:
+          currentMenu->selected++;
+          if (currentMenu->selected >= currentMenu->numItems)
+          {
+            currentMenu->selected = currentMenu->numItems - 1;
+          }
+          lcd_updateMenu();
+          break;
+        case -1:
+          if (currentMenu->selected > 0)
+          {
+            currentMenu->selected--;
+          }
+          lcd_updateMenu();
+          break;
+        }
+        if (encoderButton.getSingleDebouncedPress())
+        {
+
+          if (currentMenu->items[currentMenu->selected].subMenu != NULL)
+          {
+            // if there is a submenu, change to submenu
+            currentMenu = currentMenu->items[currentMenu->selected].subMenu;
+            lcd_updateMenu();
+          }
+          else if (currentMenu->items[currentMenu->selected].action != NULL)
+          {
+            // if there is an action, setup current action and current parameter
+            // currentMenu->items[currentMenu->selected].action(currentMenu->items[currentMenu->selected].param);
+            currentAction = currentMenu->items[currentMenu->selected].action;
+            currentParam = currentMenu->items[currentMenu->selected].param;
+          }
+          else if (currentMenu->parentMenu != NULL)
+          {
+            // if there is a paremnt menu, change to the parent menu
+            currentMenu = currentMenu->parentMenu;
+            lcd_updateMenu();
+          }
+          else
+          {
+            // if everything else fails, switch to main menu
+            if (currentMenu == &mainMenu)
+            {
+              // exit
+              isMenuShown = false;
+              lcd.clear();
+              updatePage();
+              mil2 = millis();
+            }
+            else
+            {
+              currentMenu = &mainMenu;
+              lcd_updateMenu();
+            }
+          }
+        }
+        if (currentAction != NULL)
+        {
+          if (currentAction(currentParam) == true)
+          {
+            currentAction = NULL;
+            currentParam = NULL;
+          }
+        }
+      }
+      else if (isBuzzerVolumeChangeScreenShown)
+      {
+        switch ((int)encoder.getDirection())
+        {
+        case 1:
+          if (buzzer_volume < 10)
+          {
+            buzzer_volume++;
+          }
+          buzzerVolumeChange_updateScreen();
+          buzzer_playTestBeep();
+          break;
+        case -1:
+          if (buzzer_volume > 0)
+          {
+            buzzer_volume--;
+          }
+          buzzerVolumeChange_updateScreen();
+          buzzer_playTestBeep();
+          break;
+        }
+        if (encoderButton.getSingleDebouncedPress())
+        {
+          // exit and go back to the menus
+          isBuzzerVolumeChangeScreenShown = false;
+          isMenuShown = true;
+          lcd.clear();
+          lcd_updateMenu();
+        }
+      }
+      else
+      {
+        if (xQueueReceive(actionUpdateQueue, &(buf), 0))
+        {
+          if (strcmp(buf, "update") == 0)
+          {
+            updatePage();
+            // wake the screen
+            mil2 = millis();
+          }
+        }
+        if (xQueueReceive(responseQueue, &(buf), 0))
+        {
+          // wake the screen
+          mil2 = millis();
+          lcd.setCursor(0, 2);
+          lcd.print("                    ");
+          mil = millis();
+          if (buf[1] == '1')
+          {
+            buzzer_playSuccessfulBeep();
+          }
+          else
+          {
+            buzzer_playUnsuccessfulBeep();
+          }
+          switch (buf[0])
+          {
           case '1':
-            if (buf[1] == '1') {
+            if (buf[1] == '1')
+            {
               lcd.setCursor(2, 2);
               lcd.write(0);
-            } else {
+            }
+            else
+            {
               lcd.setCursor(2, 2);
               lcd.print("x");
             }
             break;
           case '2':
-            if (buf[1] == '1') {
+            if (buf[1] == '1')
+            {
               lcd.setCursor(9, 2);
               lcd.write(0);
-            } else {
+            }
+            else
+            {
               lcd.setCursor(9, 2);
               lcd.print("x");
             }
             break;
           case '3':
-            if (buf[1] == '1') {
+            if (buf[1] == '1')
+            {
               lcd.setCursor(16, 2);
               lcd.write(0);
-            } else {
+            }
+            else
+            {
               lcd.setCursor(16, 2);
               lcd.print("x");
             }
             break;
+          }
         }
-      }
-      if(millis() - mil >= 1000){
-        lcd.setCursor(0, 2);
-        lcd.print("                    ");
-      }
+        if (millis() - mil >= 1000)
+        {
+          lcd.setCursor(0, 2);
+          lcd.print("                    ");
+        }
 
-      if(millis() - mil2 >= 5000){
-        lcd.noBacklight();
-      } else {
-        lcd.backlight();
-      }
+        if (millis() - mil2 >= 5000)
+        {
+          lcd.noBacklight();
+        }
+        else
+        {
+          lcd.backlight();
+        }
 
-      switch ((int)encoder.getDirection()) {
+        switch ((int)encoder.getDirection())
+        {
         case 1:
-          if (pageNumber < maxPageNumber) {
+          if (pageNumber < maxPageNumber)
+          {
             pageNumber++;
             updatePage();
           }
-          //wake the screen
+          // wake the screen
           mil2 = millis();
           break;
         case -1:
-          if (pageNumber > 1) {
+          if (pageNumber > 1)
+          {
             pageNumber--;
             updatePage();
           }
-          //wake the screen
+          // wake the screen
           mil2 = millis();
           break;
+        }
       }
     }
   }
@@ -98,51 +263,55 @@ public:
 protected:
   unsigned long mil;
   unsigned long mil2;
-  void updatePage() {
-    //send out page number
-    //show page
+  void updatePage()
+  {
+    // send out page number
+    // show page
     char text[21];
     int len;
     sprintf(text, "Page %i/%i           ", pageNumber, maxPageNumber);
     lcd.setCursor(0, 0);
     lcd.print(text);
-    //clear out the line
+    // clear out the line
     lcd.setCursor(0, 3);
     lcd.print("                    ");
-    //show names
-    switch (pageNumber) {
-      case 1:
-        lcd.setCursor(0, 3);
-        lcd.print(actionNames[pageNumber-1]);
-        len = actionNames[pageNumber].length();
-        lcd.setCursor((20 - len) / 2, 3);
-        lcd.print(actionNames[pageNumber]);
-        lcd.setCursor(14, 3);
-        lcd.print(actionNames[pageNumber+1]);
-        break;
-      case 2:
-        lcd.setCursor(0, 3);
-        lcd.print(actionNames[pageNumber+1]);
-        len = actionNames[pageNumber+2].length();
-        lcd.setCursor((20 - len) / 2, 3);
-        lcd.print(actionNames[pageNumber+2]);
-        lcd.setCursor(14, 3);
-        lcd.print(actionNames[pageNumber+3]);
-        break;
-      case 3:
-        lcd.setCursor(0, 3);
-        lcd.print(actionNames[pageNumber+3]);
-        len = actionNames[pageNumber+4].length();
-        lcd.setCursor((20 - len) / 2, 3);
-        lcd.print(actionNames[pageNumber+4]);
-        lcd.setCursor(14, 3);
-        lcd.print(actionNames[pageNumber+5]);
-        break;
+    // show names
+    switch (pageNumber)
+    {
+    case 1:
+      lcd.setCursor(0, 3);
+      lcd.print(actionNames[pageNumber - 1]);
+      len = actionNames[pageNumber].length();
+      lcd.setCursor((20 - len) / 2, 3);
+      lcd.print(actionNames[pageNumber]);
+      lcd.setCursor(14, 3);
+      lcd.print(actionNames[pageNumber + 1]);
+      break;
+    case 2:
+      lcd.setCursor(0, 3);
+      lcd.print(actionNames[pageNumber + 1]);
+      len = actionNames[pageNumber + 2].length();
+      lcd.setCursor((20 - len) / 2, 3);
+      lcd.print(actionNames[pageNumber + 2]);
+      lcd.setCursor(14, 3);
+      lcd.print(actionNames[pageNumber + 3]);
+      break;
+    case 3:
+      lcd.setCursor(0, 3);
+      lcd.print(actionNames[pageNumber + 3]);
+      len = actionNames[pageNumber + 4].length();
+      lcd.setCursor((20 - len) / 2, 3);
+      lcd.print(actionNames[pageNumber + 4]);
+      lcd.setCursor(14, 3);
+      lcd.print(actionNames[pageNumber + 5]);
+      break;
     }
   }
-  void updateDisplay(String text) {
+  void updateDisplay(String text)
+  {
     int len = text.length();
-    if (len < 20) {
+    if (len < 20)
+    {
       lcd.setCursor(0, 0);
       lcd.print("   COOLBOX - V1.0   ");
       lcd.setCursor(0, 1);
@@ -155,4 +324,4 @@ protected:
   }
 };
 
-#endif  // MAIN_TASK_H
+#endif // MAIN_TASK_H
