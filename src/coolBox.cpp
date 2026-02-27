@@ -207,7 +207,7 @@ void communicationTask(void *pvParam)
           // update saved names
           String str = String((char *)data);
           // very stupid way of removing the first two characters
-          char txt[60];
+          char txt[200];
           str.toCharArray(txt, str.length(), 2);
           txt[strlen(txt) - 1] = '\0';
           str = String(txt);

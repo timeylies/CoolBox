@@ -263,50 +263,35 @@ public:
 protected:
   unsigned long mil;
   unsigned long mil2;
-  void updatePage()
-  {
-    // send out page number
-    // show page
+  //vibecoded code:
+  void updatePage() {
     char text[21];
-    int len;
     sprintf(text, "Page %i/%i           ", pageNumber, maxPageNumber);
     lcd.setCursor(0, 0);
     lcd.print(text);
-    // clear out the line
+
+    // Clear the bottom line
     lcd.setCursor(0, 3);
     lcd.print("                    ");
-    // show names
-    switch (pageNumber)
-    {
-    case 1:
-      lcd.setCursor(0, 3);
-      lcd.print(actionNames[pageNumber - 1]);
-      len = actionNames[pageNumber].length();
-      lcd.setCursor((20 - len) / 2, 3);
-      lcd.print(actionNames[pageNumber]);
-      lcd.setCursor(14, 3);
-      lcd.print(actionNames[pageNumber + 1]);
-      break;
-    case 2:
-      lcd.setCursor(0, 3);
-      lcd.print(actionNames[pageNumber + 1]);
-      len = actionNames[pageNumber + 2].length();
-      lcd.setCursor((20 - len) / 2, 3);
-      lcd.print(actionNames[pageNumber + 2]);
-      lcd.setCursor(14, 3);
-      lcd.print(actionNames[pageNumber + 3]);
-      break;
-    case 3:
-      lcd.setCursor(0, 3);
-      lcd.print(actionNames[pageNumber + 3]);
-      len = actionNames[pageNumber + 4].length();
-      lcd.setCursor((20 - len) / 2, 3);
-      lcd.print(actionNames[pageNumber + 4]);
-      lcd.setCursor(14, 3);
-      lcd.print(actionNames[pageNumber + 5]);
-      break;
-    }
-  }
+
+    // Calculate the starting index for the current page
+    // Page 1 -> index 0, Page 2 -> index 3, Page 3 -> index 6
+    int baseIndex = (pageNumber - 1) * 3;
+
+    // Left item
+    lcd.setCursor(0, 3);
+    lcd.print(actionNames[baseIndex]);
+
+    // Center item
+    int centerIndex = baseIndex + 1;
+    int len = actionNames[centerIndex].length();
+    lcd.setCursor((20 - len) / 2, 3);
+    lcd.print(actionNames[centerIndex]);
+
+    // Right item
+    lcd.setCursor(14, 3);
+    lcd.print(actionNames[baseIndex + 2]);
+}
   void updateDisplay(String text)
   {
     int len = text.length();

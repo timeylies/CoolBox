@@ -21,9 +21,9 @@ QueueHandle_t actionUpdateQueue; // for all of the short names
 QueueHandle_t responseQueue;     // for the checkmarks
 bool isAck = true;               // true if acknowledged, jus setting it true for now for the lights
 bool isActionUpdateRunning = false;
-String actionNames[10];
+String actionNames[30];
 int pageNumber = 1;
-int maxPageNumber = 3;
+int maxPageNumber = 9;
 int lastButtonPressed;
 
 void startQueues()
