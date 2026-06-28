@@ -13,9 +13,9 @@
 #define PIN_BUTTON3LED 10
 
 //Integers for the leds
-int led_button1 = 0;
-int led_button2 = 0;
-int led_button3 = 0;
+uint8_t led_button1 = 0;
+uint8_t led_button2 = 0;
+uint8_t led_button3 = 0;
 
 //Pushbutton Objects
 Pushbutton button1(PIN_BUTTON1);

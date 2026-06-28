@@ -21,12 +21,27 @@ public:
   {
     // startup
     char buf[10];
-    lcd.clear();
     // wait for discovery from serial
     unsigned long prevMillis;
     int pressReadLimit;
+    bool wasActive = false;
     for (;;)
     {
+      if (!mainActive)
+      {
+        wasActive = false;
+        vTaskDelay(50);
+        continue;
+      }
+      if (!wasActive)
+      {
+        // just connected: draw the page view fresh
+        lcd.clear();
+        pageNumber = 1;
+        updatePage();
+        mil2 = millis();
+        wasActive = true;
+      }
       // do stuff
       // do menu stuff
       uint32_t duration = 0;
@@ -148,6 +163,7 @@ public:
         if (encoderButton.getSingleDebouncedPress())
         {
           // exit and go back to the menus
+          buzzer_saveVolume();
           isBuzzerVolumeChangeScreenShown = false;
           isMenuShown = true;
           lcd.clear();
@@ -156,6 +172,14 @@ public:
       }
       else
       {
+#ifdef ENABLE_VU_METER
+        if (vuDataChanged)
+        {
+          lcd_drawVuBar(1, "L:", micLevelL);
+          lcd_drawVuBar(2, "R:", micLevelR);
+          vuDataChanged = false;
+        }
+#endif
         if (xQueueReceive(actionUpdateQueue, &(buf), 0))
         {
           if (strcmp(buf, "update") == 0)
@@ -172,6 +196,7 @@ public:
           lcd.setCursor(0, 2);
           lcd.print("                    ");
           mil = millis();
+          ackRowCleared = false;
           if (buf[1] == '1')
           {
             buzzer_playSuccessfulBeep();
@@ -220,10 +245,11 @@ public:
             break;
           }
         }
-        if (millis() - mil >= 1000)
+        if (!ackRowCleared && millis() - mil >= 1000)
         {
           lcd.setCursor(0, 2);
           lcd.print("                    ");
+          ackRowCleared = true;
         }
 
         if (millis() - mil2 >= 5000)
@@ -261,6 +287,7 @@ public:
   }
 
 protected:
+  bool ackRowCleared = true;
   unsigned long mil;
   unsigned long mil2;
   //vibecoded code:
@@ -284,7 +311,7 @@ protected:
 
     // Center item
     int centerIndex = baseIndex + 1;
-    int len = actionNames[centerIndex].length();
+    int len = strlen(actionNames[centerIndex]);
     lcd.setCursor((20 - len) / 2, 3);
     lcd.print(actionNames[centerIndex]);
 

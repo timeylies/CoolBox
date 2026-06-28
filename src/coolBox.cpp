@@ -15,45 +15,49 @@ TaskHandle_t buttonTaskHandle;
 void sendAcknowledge()
 {
   // no need for a task (or atleast i think so...)
-  byte buffer[4];
+  byte buffer[5];
   cmd.acknowledgeCommand(buffer);
-  Serial.write(buffer, sizeof(buffer) + 1);
+  Serial.write(buffer, sizeof(buffer));
 }
 
 void sendDiscoveryResponse()
 {
   // no need for a task (or atleast i think so...)
-  byte buffer[4];
+  byte buffer[5];
   cmd.discoveryResponseCommand(buffer);
-  Serial.write(buffer, sizeof(buffer) + 1);
+  Serial.write(buffer, sizeof(buffer));
 }
 
-// byte buffer[4];
-int count;
+// permanent task (created once in setup()) that resends an action-update
+// command up to 5 times until acknowledged. Used to spawn a fresh short-lived
+// task per button press, which fragmented the heap the same way the buzzer
+// tasks and connect/disconnect task churn did.
+volatile int pendingAction = -1;
+
 void sendActionUpdateTask(void *pvParam)
 {
-  int action = (int)pvParam;
-  isAck = false;
-  count = 0;
   for (;;)
   {
+    if (pendingAction < 0)
+    {
+      vTaskDelay(5);
+      continue;
+    }
+    int action = pendingAction;
+    isAck = false;
     isActionUpdateRunning = true;
-    if (count <= 5 && !isAck)
+    for (int count = 0; count <= 5 && !isAck; count++)
     {
-      byte buffer[4];
+      byte buffer[5];
       cmd.actionUpdateCommand(buffer, action);
-      Serial.write(buffer, sizeof(buffer) + 1);
-      count++;
-      vTaskDelay(1 / portTICK_PERIOD_MS);
+      Serial.write(buffer, sizeof(buffer));
+      // give the PC real time to run the action and write back an ack before
+      // resending; 1ms was far too fast and caused duplicate sends/executions
+      vTaskDelay(50 / portTICK_PERIOD_MS);
     }
-    else
-    {
-      isActionUpdateRunning = false;
-      isAck = true; // temporary fix
-      vTaskDelete(NULL);
-      // error out cuz count went over 5
-    }
-    // vTaskDelete(NULL);
+    isAck = true; // temporary fix: stop retrying even if never acknowledged
+    isActionUpdateRunning = false;
+    pendingAction = -1;
   }
 }
 
@@ -61,33 +65,55 @@ void sendActionUpdate(int action)
 {
   if (!isActionUpdateRunning)
   {
-    xTaskCreate(sendActionUpdateTask, "Send Action Update Task", 256, (void *)action, 0, NULL);
+    pendingAction = action;
   }
 }
 
 void buttonTask(void *pvParam)
 {
-  led_button1 = 255;
-  led_button2 = 255;
-  led_button3 = 255;
   int min_brightness = 5;
+  bool wasActive = false;
   for (;;)
   {
+    if (!mainActive)
+    {
+      if (wasActive)
+      {
+        led_button1 = 0;
+        led_button2 = 0;
+        led_button3 = 0;
+        update_buttonLeds();
+        wasActive = false;
+      }
+      vTaskDelay(50);
+      continue;
+    }
+    if (!wasActive)
+    {
+      led_button1 = 255;
+      led_button2 = 255;
+      led_button3 = 255;
+      wasActive = true;
+    }
     if (isAck)
     {
-      if (button1.getSingleDebouncedPress() && !button2.getSingleDebouncedPress() && !button3.getSingleDebouncedPress())
+      bool b1 = button1.getSingleDebouncedPress();
+      bool b2 = button2.getSingleDebouncedPress();
+      bool b3 = button3.getSingleDebouncedPress();
+
+      if (b1 && !b2 && !b3)
       {
         led_button1 = 255;
         lastButtonPressed = 1;
         sendActionUpdate(0 + (pageNumber - 1) * 3);
       }
-      if (button2.getSingleDebouncedPress() && !button1.getSingleDebouncedPress() && !button3.getSingleDebouncedPress())
+      else if (b2 && !b1 && !b3)
       {
         led_button2 = 255;
         lastButtonPressed = 2;
         sendActionUpdate(1 + (pageNumber - 1) * 3);
       }
-      if (button3.getSingleDebouncedPress() && !button2.getSingleDebouncedPress() && !button1.getSingleDebouncedPress())
+      else if (b3 && !b1 && !b2)
       {
         led_button3 = 255;
         lastButtonPressed = 3;
@@ -107,18 +133,6 @@ void buttonTask(void *pvParam)
     {
       led_button3--;
     }
-    if (led_button1 > 255 || led_button1 < 0)
-    {
-      led_button1 = min_brightness;
-    }
-    if (led_button2 > 255 || led_button2 < 0)
-    {
-      led_button2 = min_brightness;
-    }
-    if (led_button3 > 255 || led_button3 < 0)
-    {
-      led_button3 = min_brightness;
-    }
     update_buttonLeds();
     delay(5);
   }
@@ -127,7 +141,7 @@ void buttonTask(void *pvParam)
 void communicationTask(void *pvParam)
 {
   boolean newData = false;
-  const byte numBytes = 100;
+  const byte numBytes = 220;
   byte data[numBytes];
   byte numReceived = 0;
 
@@ -141,8 +155,10 @@ void communicationTask(void *pvParam)
     byte rb;
     int StringCount = 0;
 
+    bool readAny = false;
     while (Serial.available() > 0 && newData == false)
     {
+      readAny = true;
       rb = Serial.read();
 
       if (recvInProgress == true)
@@ -184,6 +200,7 @@ void communicationTask(void *pvParam)
         switch (data[1])
         { // should be where the command byte is
         case cmd.commands::discovery:
+        {
           // respond
           sendDiscoveryResponse();
           // send queue out
@@ -191,42 +208,62 @@ void communicationTask(void *pvParam)
           sprintf(buf, "discovery");
           xQueueSend(discoveryQueue, (void *)buf, (TickType_t)0);
           break;
+        }
         case cmd.commands::disconnect:
+        {
           // go to idle (or just reset)
           buzzer_playDisconnected();
           resetFunc();
           break;
+        }
         case cmd.commands::acknowledge:
+        {
           // tell code to stop sending commands
           isAck = true;
           char buff[10];
           sprintf(buff, "%i%i", lastButtonPressed, data[2]);
           xQueueSend(responseQueue, (void *)buff, (TickType_t)0);
           break;
-        case cmd.commands::actionUpdate:
-          // update saved names
-          String str = String((char *)data);
-          // very stupid way of removing the first two characters
-          char txt[200];
-          str.toCharArray(txt, str.length(), 2);
-          txt[strlen(txt) - 1] = '\0';
-          str = String(txt);
-          // Serial.print(str);
-          // clear out the array
-          memset(actionNames, 0, sizeof(actionNames));
-          while (str.length() > 0)
+        }
+        case cmd.commands::vuUpdate:
+        {
+#ifdef ENABLE_VU_METER
+          // fire-and-forget: no ack, mainTask just redraws with whatever's freshest
+          if (numReceived >= 4)
           {
-            int index = str.indexOf(';');
-            if (index == -1) // No space found
+            micLevelL = data[2];
+            micLevelR = data[3];
+            vuDataChanged = true;
+          }
+#endif
+          break;
+        }
+        case cmd.commands::actionUpdate:
+        {
+          // payload is data[2 .. numReceived-2]; data[numReceived-1] is the crc byte
+          const int maxNameLen = sizeof(actionNames[0]) - 1; // 19, leaves room for '\0'
+          for (int i = 0; i < 30; i++) actionNames[i][0] = '\0';
+          int tokenStart = 2;
+          int payloadEnd = numReceived - 1;
+          for (int i = 2; i < payloadEnd && StringCount < 30; i++)
+          {
+            if (data[i] == ';')
             {
-              actionNames[StringCount++] = txt;
-              break;
+              int len = i - tokenStart;
+              if (len > maxNameLen) len = maxNameLen;
+              memcpy(actionNames[StringCount], &data[tokenStart], len);
+              actionNames[StringCount][len] = '\0';
+              StringCount++;
+              tokenStart = i + 1;
             }
-            else
-            {
-              actionNames[StringCount++] = str.substring(0, index);
-              str = str.substring(index + 1);
-            }
+          }
+          if (tokenStart < payloadEnd && StringCount < 30)
+          {
+            int len = payloadEnd - tokenStart;
+            if (len > maxNameLen) len = maxNameLen;
+            memcpy(actionNames[StringCount], &data[tokenStart], len);
+            actionNames[StringCount][len] = '\0';
+            StringCount++;
           }
           sendAcknowledge();
           // send queue out
@@ -235,27 +272,13 @@ void communicationTask(void *pvParam)
           xQueueSend(actionUpdateQueue, (void *)updateBuf, (TickType_t)0);
           break;
         }
+        }
       }
     }
-  }
-}
-
-void mainTaskQueueHandlerTask(void *pvParam)
-{
-  // wait for queue
-  char buf[10];
-  for (;;)
-  {
-    if (xQueueReceive(mainTaskQueue, &(buf), 0))
+    if (!readAny)
     {
-      if (strcmp(buf, "init") == 0)
-      {
-        mainTask.init();
-        // also start the button task
-        xTaskCreate(buttonTask, "Button Task", 1048, NULL, 0, &buttonTaskHandle);
-      }
+      vTaskDelay(1);
     }
-    vTaskDelay(1);
   }
 }
 
@@ -319,14 +342,18 @@ void setup()
 {
   Serial.begin(115200);
   initInputs();
+  buzzer_loadVolume();
   lcd_init(true);
   buzzer_playStartup();
-  startup.init();
   startQueues();
-  // start the main communication task
-  xTaskCreate(communicationTask, "communicationTask", 512, NULL, 0, NULL);
-  // start the main task queue handler
-  xTaskCreate(mainTaskQueueHandlerTask, "mainTaskQueueHandlerTask", 128, NULL, 0, NULL);
+  // all long-lived tasks are created exactly once here and stay alive for the
+  // lifetime of the program; they gate their behavior on `mainActive` instead
+  // of being deleted/recreated on connect/disconnect (see config.h)
+  startup.init();
+  mainTask.init();
+  xTaskCreate(buttonTask, "Button Task", 1048, NULL, 0, &buttonTaskHandle);
+  xTaskCreate(communicationTask, "communicationTask", 2048, NULL, 0, NULL);
+  xTaskCreate(sendActionUpdateTask, "Send Action Update Task", 256, NULL, 0, NULL);
 }
 
 void loop()
@@ -342,17 +369,14 @@ void resetFunc()
   wdt_enable(WDTO_15MS);
   while(1);
   */
-  // trying to full on reset proved to be unreliable so we just go back to idle
-  if (mainTask.taskHandle != NULL)
-  {
-    vTaskDelete(mainTask.taskHandle);            // kill the main task
-    vTaskDelete(buttonTaskHandle);               // kill the button task
-    memset(actionNames, 0, sizeof(actionNames)); // clear the saved action names
-    xQueueReset(discoveryQueue);                 // reset all queues
-    xQueueReset(mainTaskQueue);
-    xQueueReset(actionUpdateQueue);
-    xQueueReset(responseQueue);
-    isMenuShown = false;                         // make sure menu isn't shown
-    startup.init();
-  }
+  // trying to full on reset proved to be unreliable so we just go back to idle.
+  // mainTask/buttonTask/startupTask stay alive permanently (see config.h); flipping
+  // mainActive off hands the screen back to startupTask without deleting/recreating
+  // any tasks, avoiding the heap fragmentation that caused malloc failures on reconnect.
+  mainActive = false;
+  memset(actionNames, 0, sizeof(actionNames)); // clear the saved action names
+  xQueueReset(discoveryQueue);                 // reset all queues
+  xQueueReset(actionUpdateQueue);
+  xQueueReset(responseQueue);
+  isMenuShown = false; // make sure menu isn't shown
 }

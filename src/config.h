@@ -4,33 +4,47 @@
 #include <semphr.h>
 #include <Tween.h>
 #include <Wire.h>
+#include <EEPROM.h>
 #include <hd44780.h>                       // main hd44780 header
 #include <hd44780ioClass/hd44780_I2Cexp.h> // i2c expander i/o class header
 #include <Pushbutton.h>
 #include "commands.h"
 #include "buttons.h"
 
+// comment this out if you don't want the mic VU meter shown on the LCD
+// (e.g. you're not using Voicemeeter, or just don't want it)
+#define ENABLE_VU_METER
+
 // for resetting
 void resetFunc();
 
 // for coms
 Cmd cmd;
-QueueHandle_t discoveryQueue;    // responsible for switching from startup task to main task
-QueueHandle_t mainTaskQueue;     // starts the main task
+QueueHandle_t discoveryQueue;    // tells startup screen a PC connected
 QueueHandle_t actionUpdateQueue; // for all of the short names
 QueueHandle_t responseQueue;     // for the checkmarks
 bool isAck = true;               // true if acknowledged, jus setting it true for now for the lights
 bool isActionUpdateRunning = false;
-String actionNames[30];
+// fixed-size buffers, not String[]: storage is static (no heap allocation),
+// so repeated connect/disconnect cycles can't fragment the heap via this array.
+// (memset-ing an array of String objects is also undefined behavior, since it
+// overwrites their internal heap pointers without running destructors.)
+char actionNames[30][20];
 int pageNumber = 1;
 int maxPageNumber = 9;
 int lastButtonPressed;
+
+// true once a PC has connected and the main page-browsing UI should be shown;
+// false when disconnected (startup/idle screen shown instead).
+// mainTask/buttonTask/startupTask all stay alive permanently and gate their
+// behavior on this flag instead of being deleted/recreated on connect/disconnect,
+// since repeated xTaskCreate/vTaskDelete cycles fragment the AVR's tiny heap.
+volatile bool mainActive = false;
 
 void startQueues()
 {
   // start up all queues here
   discoveryQueue = xQueueCreate(2, 10);
-  mainTaskQueue = xQueueCreate(2, 10);
   actionUpdateQueue = xQueueCreate(2, 10);
   responseQueue = xQueueCreate(2, 10);
 }
@@ -49,6 +63,17 @@ byte checkChar[] = {
     0x1C,
     0x08,
     0x00};
+
+#ifdef ENABLE_VU_METER
+// VU bar glyphs: each character cell is 5 dots wide, so these give 5 sub-steps
+// of horizontal fill resolution per column (slots 1-4 = 1..4 columns filled
+// from the left; slot 5 = fully filled, used for whole "lit" columns).
+byte barChar1[] = {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10};
+byte barChar2[] = {0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18};
+byte barChar3[] = {0x1C, 0x1C, 0x1C, 0x1C, 0x1C, 0x1C, 0x1C, 0x1C};
+byte barChar4[] = {0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E, 0x1E};
+byte barCharFull[] = {0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F};
+#endif
 
 void lcd_init(bool backlightOn)
 { // function to initialize the lcd
@@ -72,11 +97,81 @@ void lcd_init(bool backlightOn)
       lcd.print("      LCD OFF       ");
     }
     lcd.createChar(0, checkChar);
+#ifdef ENABLE_VU_METER
+    lcd.createChar(1, barChar1);
+    lcd.createChar(2, barChar2);
+    lcd.createChar(3, barChar3);
+    lcd.createChar(4, barChar4);
+    lcd.createChar(5, barCharFull);
+#endif
   }
 }
 
+#ifdef ENABLE_VU_METER
+// latest mic L/R levels (0-255) from the PC; updated by communicationTask,
+// drawn by mainTask. No locking: single-writer/single-reader of plain bytes.
+volatile uint8_t micLevelL = 0;
+volatile uint8_t micLevelR = 0;
+volatile bool vuDataChanged = false;
+
+const int VU_BAR_WIDTH = 18; // columns available after the 2-char "L:"/"R:" label
+const int VU_BAR_STEPS = VU_BAR_WIDTH * 5; // 5 sub-steps per column
+
+void lcd_drawVuBar(int row, const char *label, uint8_t level)
+{
+  int steps = ((int)level * VU_BAR_STEPS) / 255;
+  int fullCols = steps / 5;
+  int partial = steps % 5;
+  if (fullCols > VU_BAR_WIDTH)
+  {
+    fullCols = VU_BAR_WIDTH;
+    partial = 0;
+  }
+
+  lcd.setCursor(0, row);
+  lcd.print(label);
+  for (int i = 0; i < fullCols; i++)
+  {
+    lcd.write(5); // full block
+  }
+  if (fullCols < VU_BAR_WIDTH)
+  {
+    if (partial > 0)
+    {
+      lcd.write(partial); // partial-fill glyph (slots 1-4)
+      fullCols++;
+    }
+    for (int i = fullCols; i < VU_BAR_WIDTH; i++)
+    {
+      lcd.print(" ");
+    }
+  }
+}
+#endif
+
+// EEPROM survives both power cycles and firmware reflashes (avrdude doesn't
+// touch it), so we use it to persist user settings like buzzer volume.
+#define EEPROM_ADDR_BUZZER_VOLUME 0
+
 int buzzer_volume = 5;
 bool isBuzzerVolumeChangeScreenShown = false;
+
+void buzzer_loadVolume()
+{
+  uint8_t stored = EEPROM.read(EEPROM_ADDR_BUZZER_VOLUME);
+  if (stored <= 10)
+  {
+    buzzer_volume = stored;
+  }
+  // else: EEPROM was never written (reads 0xFF on a fresh chip) or holds a
+  // bogus value, keep the default of 5
+}
+
+void buzzer_saveVolume()
+{
+  EEPROM.update(EEPROM_ADDR_BUZZER_VOLUME, (uint8_t)buzzer_volume);
+}
+
 void buzzerVolumeChange_updateScreen()
 {
   lcd.setCursor(0, 0);
@@ -218,9 +313,9 @@ bool disconnect(void *)
   lcd.print("   Disconnect...   ");
   delay(500);
   // request pc to disconnect, same as pressing the button on the ui on the pc
-  byte buffer[4];
+  byte buffer[5];
   cmd.disconnectCommand(buffer);
-  Serial.write(buffer, sizeof(buffer) + 1);
+  Serial.write(buffer, sizeof(buffer));
   return true;
 }
 
@@ -238,75 +333,43 @@ bool disconnect(void *)
 // Pins 14 & 15 - Teensy 2.0
 // Pins 25 & 26 - Teensy++ 2.0
 
-void buzzer_playSuccessfulBeepTask(void *pvParam)
-{
-  toneAC(1400, buzzer_volume, 15, false);
-  vTaskDelete(NULL);
-}
-
+// these used to each spawn a short-lived FreeRTOS task just to call toneAC()
+// and immediately self-delete; on this AVR heap (heap_3, backed by avr-libc
+// malloc/free) repeated task create/delete cycles fragment the 8KB heap and
+// eventually cause malloc failures, so we just call toneAC() directly instead.
 void buzzer_playSuccessfulBeep()
 {
-  xTaskCreate(buzzer_playSuccessfulBeepTask, "Buzzer Play Successful Beep Task", 256, NULL, 0, NULL);
-}
-
-void buzzer_playUnsuccessfulBeepTask(void *pvParam)
-{
-  toneAC(1000, buzzer_volume, 15, false);
-  vTaskDelete(NULL);
+  toneAC(1400, buzzer_volume, 15, false);
 }
 
 void buzzer_playUnsuccessfulBeep()
 {
-  xTaskCreate(buzzer_playUnsuccessfulBeepTask, "Buzzer Play Unsuccessful Beep Task", 256, NULL, 0, NULL);
+  toneAC(1000, buzzer_volume, 15, false);
 }
 
-void buzzer_playStartupTask(void *pvParam)
+void buzzer_playStartup()
 {
   toneAC(600, buzzer_volume, 20, false);
   toneAC(800, buzzer_volume, 20, false);
   toneAC(1000, buzzer_volume, 20, false);
   toneAC(1200, buzzer_volume, 20, false);
-  vTaskDelete(NULL);
-}
-
-void buzzer_playStartup()
-{
-  xTaskCreate(buzzer_playStartupTask, "Buzzer Play Startup Task", 256, NULL, 0, NULL);
-}
-
-void buzzer_playConnectedTask(void *pvParam)
-{
-  toneAC(900, buzzer_volume, 40, false);
-  toneAC(1100, buzzer_volume, 40, false);
-  vTaskDelete(NULL);
 }
 
 void buzzer_playConnected()
 {
-  xTaskCreate(buzzer_playConnectedTask, "Buzzer Play Connected Task", 256, NULL, 0, NULL);
-}
-
-void buzzer_playDisconnectedTask(void *pvParam)
-{
-  toneAC(1100, buzzer_volume, 40, false);
   toneAC(900, buzzer_volume, 40, false);
-  vTaskDelete(NULL);
+  toneAC(1100, buzzer_volume, 40, false);
 }
 
 void buzzer_playDisconnected()
 {
-  xTaskCreate(buzzer_playDisconnectedTask, "Buzzer Play Connected Task", 256, NULL, 0, NULL);
-}
-
-void buzzer_playTestBeepTask(void *pvParam)
-{
-  toneAC(700, buzzer_volume, 50, true);
-  vTaskDelete(NULL);
+  toneAC(1100, buzzer_volume, 40, false);
+  toneAC(900, buzzer_volume, 40, false);
 }
 
 void buzzer_playTestBeep()
 {
-  xTaskCreate(buzzer_playTestBeepTask, "Buzzer Play Test Beep Task", 256, NULL, 0, NULL);
+  toneAC(700, buzzer_volume, 50, true);
 }
 
 #else

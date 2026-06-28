@@ -24,10 +24,24 @@ public:
     // wait for discovery from serial
     unsigned long prevMillis;
     int pressReadLimit;
+    bool wasActive = true; // forces a fresh idle screen draw on first pass
 
     char buf[10];
     for (;;)
     {
+      if (mainActive)
+      {
+        // PC is connected; mainTask owns the screen. Just stay dormant.
+        wasActive = true;
+        vTaskDelay(50);
+        continue;
+      }
+      if (wasActive)
+      {
+        // just disconnected (or just booted): redraw the idle screen fresh
+        lcd.clear();
+        wasActive = false;
+      }
       // updateDisplay("Waiting for PC...");
       // switch over to the main task once done
       // do menu stuff
@@ -145,6 +159,7 @@ public:
         if (encoderButton.getSingleDebouncedPress())
         {
           //exit and go back to the menus
+          buzzer_saveVolume();
           isBuzzerVolumeChangeScreenShown = false;
           isMenuShown = true;
           lcd.clear();
@@ -165,10 +180,8 @@ public:
           updateDisplay("Loading...");
           buzzer_playConnected();
           delay(500);
-          char buf[10];
-          sprintf(buf, "init");
-          xQueueSend(mainTaskQueue, (void *)buf, (TickType_t)0);
-          vTaskDelete(NULL);
+          isMenuShown = false;
+          mainActive = true; // hand the screen over to mainTask/buttonTask
         }
       }
       vTaskDelay(1);
